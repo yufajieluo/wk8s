@@ -1,41 +1,11 @@
 #!/bin/bash
 
+#set -x
+set -e
+
 source ./common.sh
 
-# ===== global params
-server_name=${0}
-server_version=v1.1.0
-
-response=
-root_work_path=
-docker_repo_aliyun=registry.cn-beijing.aliyuncs.com/wshuai
-package_repo_custom=http://45.76.247.122:9000/public
-
-k8s_master_name=ws-k8s-master-01
-k8s_master_addr=10.100.101.50
-
-k8s_node_names=(ws-k8s-node-01 ws-k8s-node-02)
-k8s_node_addrs=(10.100.101.51 10.100.101.52)
-
-k8s_harbor_name=hub.wsk8s.com
-k8s_harbor_addr=10.100.101.49
-
-# =====================================
-# k8s v1.19.0 images:
-
-k8s_port=6443
-k8s_version=1.19.0
-
-docker_images=(
-    kube-apiserver:v1.19.0
-    kube-controller-manager:v1.19.0
-    kube-scheduler:v1.19.0
-    kube-proxy:v1.19.0
-    pause:3.2
-    etcd:3.4.9-1
-    coredns:1.7.0
-)
-# =====================================
+source ./config.sh
 
 function check_system()
 {
@@ -69,12 +39,16 @@ function configure_hostname()
     do
         echo ${k8s_node_addrs[${i}]} ${k8s_node_names[${i}]} >> ${host_file}
     done
-    echo ${k8s_harbor_addr} ${k8s_harbor_name} >> ${host_file}
+#    echo ${k8s_harbor_addr} ${k8s_harbor_name} >> ${host_file}
+
+    # set self hostname
+    host_name=`grep $(hostname -I | cut -d' ' -f1) /etc/hosts | awk '{print $2}'`
+    hostnamectl set-hostname ${host_name}
 }
 
 function prepare_dependent()
 {
-    yum install -y conntrack ntpdate ntp ipvsadm ipset iptables curl sysstat libseccomp wget vim net-tools git
+    yum install -y conntrack ntpdate ntp iptables curl sysstat libseccomp wget vim net-tools git gcc gcc-c++ 
 }
 
 function set_timezone()
@@ -131,6 +105,13 @@ EOF
 
     modprobe br_netfilter
     sysctl -p ${k8s_conf_file}
+    
+    # startup when power on
+    cat > /etc/sysconfig/modules/br_netfilter.modules <<EOF
+#!/bin/bash
+modprobe br_netfilter
+EOF
+    chmod 755 /etc/sysconfig/modules/br_netfilter.modules
 }
 
 function configure_journal()
@@ -167,7 +148,9 @@ EOF
 
 function configure_ipvs()
 {
-    ipvs_file=/etc/sysconfig/modules/ipvs.modules
+    yum install -y ipvsadm ipset
+
+    local ipvs_file=/etc/sysconfig/modules/ipvs.modules
 
     modprobe br_netfilter
 
@@ -178,6 +161,7 @@ modprobe -- ip_vs_rr
 modprobe -- ip_vs_wrr
 modprobe -- ip_vs_sh
 modprobe -- nf_conntrack_ipv4
+modprobe -- nf_conntrack
 EOF
 
     chmod 755 ${ipvs_file}
@@ -185,36 +169,37 @@ EOF
     #lsmod | grep -e ip_vs -e nf_conntrack_ipv4
 }
 
-function install_docker()
+function install_containerd()
 {
-    docker_lib_path=${root_work_path}/lib/docker
-
-    yum install -y yum-utils device-mapper-persistent-data lvm2
-    yum-config-manager --add-repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
-    yum update -y
-    yum install -y docker-ce
-
-    mkdir /etc/docker
-
-    cat > /etc/docker/daemon.json <<EOF
-{
-    "exec-opts": ["native.cgroupdriver=systemd"],
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "100m"
-    },
-    "insecure-registries": ["https://${k8s_harbor_name}"]
-}
-EOF
-
-    mkdir -p /etc/systemd/system/docker.service.d
-
-    mkdir -p ${docker_lib_path}
-    sed -i "/^ExecStart/s/$/& --graph ${docker_lib_path//\//\\/}/g" /usr/lib/systemd/system/docker.service
-
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/cri-containerd/v1.6.2/containerd-1.6.2-linux-amd64.tar.gz
+    tar Cxzvf /usr/local containerd-1.6.2-linux-amd64.tar.gz
+    rm -f containerd-1.6.2-linux-amd64.tar.gz
+    
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/cri-containerd/containerd.service -P /usr/lib/systemd/system/
+    
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i '/sandbox_image/s/.*/    sandbox_image = "registry.k8s.io\/pause:3.9"/g' /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+    
     systemctl daemon-reload
-    systemctl restart docker
-    systemctl enable docker
+    systemctl restart containerd
+    systemctl enable --now containerd
+}
+
+function install_runc()
+{
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/runc/v1.1.6/runc.amd64
+    install -m 755 runc.amd64 /usr/local/sbin/runc
+    rm -f runc.amd64
+}
+
+function install_cni()
+{
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/cni-plugins/v1.1.1/cni-plugins-linux-amd64-v1.1.1.tgz
+    mkdir -p /opt/cni/bin
+    tar Cxzvf /opt/cni/bin cni-plugins-linux-amd64-v1.1.1.tgz
+    rm -f cni-plugins-linux-amd64-v1.1.1.tgz
 }
 
 function install_kubeadm()
@@ -230,20 +215,54 @@ gpgkey=http://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg
        http://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
 EOF
 
-    yum install -y kubeadm-${k8s_version} kubectl-${k8s_version} kubelet-${k8s_version}
-    systemctl enable kubelet.service
+    yum install -y kubeadm-${k8s_version} kubectl-${k8s_version} kubelet-${k8s_version} --disableexcludes=kubernetes
+    #sed -i "s/KUBELET_EXTRA_ARGS=/KUBELET_EXTRA_ARGS=\"--cgroup-driver=systemd\"/g" /etc/sysconfig/kubelet
+    #sed -i "s/KUBELET_KUBEADM_ARGS=\"/KUBELET_KUBEADM_ARGS=\"--cgroupdriver=systemd /g" /var/lib/kubelet/kubeadm-flags.env
+    systemctl enable --now kubelet
 }
 
 function pull_kubeadm_images()
 {
-    docker_repo_k8s=k8s.gcr.io
+    docker_repo_k8s=registry.k8s.io
 
+    # ctr
     for image in ${docker_images[@]}
     do
-        docker pull ${docker_repo_aliyun}/${image}
-        docker tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}/${image}
-        docker rmi ${docker_repo_aliyun}/${image}
+        ctr -n k8s.io images pull -k ${docker_repo_aliyun}/${image}
+        
+        if [ "${image%:*}" == "coredns" ]; then
+            ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}"/coredns/"${image}
+        else
+            ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}/${image}
+        fi
+        
+        ctr -n k8s.io images rm ${docker_repo_aliyun}/${image}
     done
+    
+    # calico
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/typha:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/calico-node:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/cni:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/csi:v3.26.3
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/node-driver-registrar:v3.26.3
+
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3  docker.io/calico/kube-controllers:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/typha:v3.26.3                    docker.io/calico/typha:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/calico-node:v3.26.3              docker.io/calico/node:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3       docker.io/calico/pod2daemon-flexvol:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/cni:v3.26.3                      docker.io/calico/cni:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/csi:v3.26.3                      docker.io/calico/csi:v3.26.3
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/node-driver-registrar:v3.26.3    docker.io/calico/node-driver-registrar:v3.26.3
+
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/typha:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/calico-node:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/cni:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/csi:v3.26.3
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/node-driver-registrar:v3.26.3
 }
 
 function init_k8s_master()
@@ -254,18 +273,11 @@ function init_k8s_master()
     kubeadm_log_file=${root_work_path}/install-k8s/core/kubeadm-init.log
 
     kubeadm config print init-defaults > ${kubeadm_conf_file}
+    sed -i "s/name: node/name: $(hostname)/" ${kubeadm_conf_file}
     sed -i "s/1.2.3.4/${k8s_master_addr}/g" ${kubeadm_conf_file}
-    sed -i "/dnsDomain/a\  podSubnet: \"10.244.0.0\/16\"" ${kubeadm_conf_file}
-    cat >> ${kubeadm_conf_file} <<EOF
----
-apiVersion: kubeproxy.config.k8s.io/v1alpha1
-kind: KubeProxyConfiguration
-featureGates:
-  SupportIPVSProxyMode: true
-mode: ipvs
-EOF
+    sed -i "/dnsDomain/a\  podSubnet: 10.244.0.0\/16" ${kubeadm_conf_file}
 
-    kubeadm init --config=${kubeadm_conf_file} --upload-certs | tee ${kubeadm_log_file}
+    kubeadm init --config=${kubeadm_conf_file} --ignore-preflight-errors=all --upload-certs | tee ${kubeadm_log_file}
     response=`tail -2 ${kubeadm_log_file}`
     response=${response/\\/}
 
@@ -274,16 +286,21 @@ EOF
     chown $(id -u):$(id -g) $HOME/.kube/config
 }
 
-function install_flannel()
-{
+function install_calico()
+{   
+    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/tigera-operator:v1.30.7
+    ctr -n k8s.io images tag ${docker_repo_aliyun}/tigera-operator:v1.30.7 quay.io/tigera/operator:v1.30.7
+    ctr -n k8s.io images rm ${docker_repo_aliyun}/tigera-operator:v1.30.7
     
-    flannel_yaml_path=${root_work_path}/install-k8s/plugin/flannel
-    flannel_yaml_file=${package_repo_custom}/kube-flannel.yml
     
-    mkdir -p ${flannel_yaml_path}
-    wget ${flannel_yaml_file} -P ${flannel_yaml_path}
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/calico/v3.26.3/tigera-operator.yaml
+    kubectl create -f tigera-operator.yaml
+    rm -f tigera-operator.yaml
 
-    kubectl create -f ${flannel_yaml_path}/${flannel_yaml_file##*/}
+    wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/calico/v3.26.3/custom-resources.yaml
+    sed -i "/cidr:/s/.*/      cidr: 10.244.0.0\/16/g" custom-resources.yaml
+    kubectl create -f custom-resources.yaml
+    rm -f custom-resources.yaml
 }
 
 function join_k8s()
@@ -314,7 +331,9 @@ function common_install()
         configure_k8s
         configure_journal
         configure_ipvs
-        install_docker
+        install_containerd
+        install_runc
+        install_cni
         install_kubeadm
         pull_kubeadm_images
     )
@@ -326,7 +345,7 @@ function master_install()
 {
     func_list=(
         init_k8s_master
-        install_flannel
+        install_calico
         # install dashboard
     )
     funcs_handler "${func_list[*]}"
@@ -373,12 +392,14 @@ function help()
     print_color "WARNING" "  1. 建议安装 Kubernetes 之前，先把系统内核升级到4.4以上，内核3.x会引发不稳定"
     print_color "WARNING" "     可使用 upgrade_kernel_4.sh 脚本进行升级内核"
     print_color "WARNING" "  2. 此脚本目前只适用于 Centos7 系统"
-    print_color "WARNING" "  3. 此脚本安装的 Kubernetes 版本为 v1.19.0"
+    print_color "WARNING" "  3. 此脚本安装的 Kubernetes 版本为 ${k8s_version}"
+    exit 0
 }
 
 function version()
 {
     print_color "SYSTEM" "${server_name} ${server_version}"
+    exit 0
 }
 
 function funcs_handler()
@@ -397,7 +418,6 @@ function funcs_handler()
 }
 
 #===================================================
-
 
 ARGS=`getopt -o t:,b: --long help,version,dashboard,join,type:,path:,token:,hash: -- "$@"`
 if [ $# == 0 ];
@@ -516,3 +536,4 @@ case ${type} in
         break
         ;;
 esac
+
