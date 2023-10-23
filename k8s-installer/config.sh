@@ -22,7 +22,7 @@ k8s_node_addrs=(10.100.101.51 10.100.101.52)
 # k8s v1.19.0 images:
 
 k8s_port=6443
-k8s_version=1.27.0
+k8s_version=1.28.0
 
 docker_images=(
     kube-apiserver:v${k8s_version}
@@ -30,7 +30,7 @@ docker_images=(
     kube-scheduler:v${k8s_version}
     kube-proxy:v${k8s_version}
     pause:3.9
-    etcd:3.5.7-0
+    etcd:3.5.9-0
     coredns:v1.10.1
 )
 
