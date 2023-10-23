@@ -33,5 +33,15 @@ docker_images=(
     etcd:3.5.9-0
     coredns:v1.10.1
 )
-# =====================================
 
+images_calico=(
+    calico-kube-controllers:v3.26.3
+    typha:v3.26.3
+    calico-node:v3.26.3
+    pod2daemon-flexvol:v3.26.3
+    cni:v3.26.3
+    csi:v3.26.3
+    node-driver-registrar:v3.26.3
+)
+
+# =====================================

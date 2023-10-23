@@ -48,7 +48,7 @@ function configure_hostname()
 
 function prepare_dependent()
 {
-    yum install -y conntrack ntpdate ntp iptables curl sysstat libseccomp wget vim net-tools git gcc gcc-c++ 
+    yum install -y conntrack ntpdate ntp iptables curl sysstat libseccomp wget vim net-tools git gcc gcc-c++
 }
 
 function set_timezone()
@@ -67,8 +67,13 @@ function stop_swap()
 
 function stop_selinux()
 {
+    set +e
     setenforce 0
-    sed -i 's/^SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
+    if [ $? -ne 0 ]; then
+        sed -i 's/^SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
+    fi
+    set -e
+
 }
 
 function stop_firewall()
@@ -105,7 +110,7 @@ EOF
 
     modprobe br_netfilter
     sysctl -p ${k8s_conf_file}
-    
+
     # startup when power on
     cat > /etc/sysconfig/modules/br_netfilter.modules <<EOF
 #!/bin/bash
@@ -115,7 +120,7 @@ EOF
 }
 
 function configure_journal()
-{   
+{
     mkdir -p /var/log/journal
     mkdir -p /etc/systemd/journal.conf.d
     cat > /etc/systemd/journal.conf.d/99-prophet.conf <<EOF
@@ -142,7 +147,7 @@ MaxRetentionSec=2week
 # 不将日志转发到 syslog
 ForwardToSyslog=no
 EOF
-    
+
     systemctl restart systemd-journald
 }
 
@@ -174,14 +179,14 @@ function install_containerd()
     wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/cri-containerd/v1.6.2/containerd-1.6.2-linux-amd64.tar.gz
     tar Cxzvf /usr/local containerd-1.6.2-linux-amd64.tar.gz
     rm -f containerd-1.6.2-linux-amd64.tar.gz
-    
+
     wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/cri-containerd/containerd.service -P /usr/lib/systemd/system/
-    
+
     mkdir -p /etc/containerd
     containerd config default > /etc/containerd/config.toml
     sed -i '/sandbox_image/s/.*/    sandbox_image = "registry.k8s.io\/pause:3.9"/g' /etc/containerd/config.toml
     sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-    
+
     systemctl daemon-reload
     systemctl restart containerd
     systemctl enable --now containerd
@@ -223,52 +228,45 @@ EOF
 
 function pull_kubeadm_images()
 {
-    docker_repo_k8s=registry.k8s.io
+    set +e
 
     # ctr
+    local docker_repo_k8s=registry.k8s.io
     for image in ${docker_images[@]}
     do
-        ctr -n k8s.io images pull -k ${docker_repo_aliyun}/${image}
-        
-        if [ "${image%:*}" == "coredns" ]; then
-            ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}"/coredns/"${image}
-        else
-            ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}/${image}
+        ctr -n k8s.io images list | grep ${docker_repo_k8s}/${image}
+        if [ $? -ne 0 ]; then
+            ctr -n k8s.io images pull -k ${docker_repo_aliyun}/${image}
+
+            if [ "${image%:*}" == "coredns" ]; then
+                ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}"/coredns/"${image}
+            else
+                ctr -n k8s.io images tag ${docker_repo_aliyun}/${image} ${docker_repo_k8s}/${image}
+            fi
+
+            ctr -n k8s.io images rm ${docker_repo_aliyun}/${image}
         fi
-        
-        ctr -n k8s.io images rm ${docker_repo_aliyun}/${image}
     done
-    
+
     # calico
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/typha:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/calico-node:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/cni:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/csi:v3.26.3
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/node-driver-registrar:v3.26.3
+    local docker_repo_calico=docker.io/calico
+    for image in ${images_calico[@]}
+    do
+        ctr -n k8s.io images list | grep ${docker_repo_calico}/${image}
+        if [ $? -ne 0 ]; then
+            ctr -n k8s.io images pull -k ${docker_repo_aliyun}/${image}
+            ctr -n k8s.io images tag ${docker_repo_aliyun}/${image}  ${docker_repo_calico}/${image}
+            ctr -n k8s.io images rm ${docker_repo_aliyun}/${image}
+        fi
+    done
 
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3  docker.io/calico/kube-controllers:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/typha:v3.26.3                    docker.io/calico/typha:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/calico-node:v3.26.3              docker.io/calico/node:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3       docker.io/calico/pod2daemon-flexvol:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/cni:v3.26.3                      docker.io/calico/cni:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/csi:v3.26.3                      docker.io/calico/csi:v3.26.3
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/node-driver-registrar:v3.26.3    docker.io/calico/node-driver-registrar:v3.26.3
-
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/calico-kube-controllers:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/typha:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/calico-node:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/pod2daemon-flexvol:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/cni:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/csi:v3.26.3
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/node-driver-registrar:v3.26.3
+    set -e
 }
 
 function init_k8s_master()
 {
     mkdir -p ${root_work_path}/install-k8s/core
-    
+
     kubeadm_conf_file=${root_work_path}/install-k8s/core/kubeadm-config.yaml
     kubeadm_log_file=${root_work_path}/install-k8s/core/kubeadm-init.log
 
@@ -287,12 +285,17 @@ function init_k8s_master()
 }
 
 function install_calico()
-{   
-    ctr -n k8s.io images pull -k ${docker_repo_aliyun}/tigera-operator:v1.30.7
-    ctr -n k8s.io images tag ${docker_repo_aliyun}/tigera-operator:v1.30.7 quay.io/tigera/operator:v1.30.7
-    ctr -n k8s.io images rm ${docker_repo_aliyun}/tigera-operator:v1.30.7
-    
-    
+{
+    set +e
+    ctr -n k8s.io images list | grep quay.io/tigera/operator:v1.30.7
+    if [ $? -ne 0 ]; then
+        ctr -n k8s.io images pull -k ${docker_repo_aliyun}/tigera-operator:v1.30.7
+        ctr -n k8s.io images tag ${docker_repo_aliyun}/tigera-operator:v1.30.7 quay.io/tigera/operator:v1.30.7
+        ctr -n k8s.io images rm ${docker_repo_aliyun}/tigera-operator:v1.30.7
+    fi
+    set -e
+
+
     wget http://wsnote.oss-cn-beijing.aliyuncs.com/wk8s/calico/v3.26.3/tigera-operator.yaml
     kubectl create -f tigera-operator.yaml
     rm -f tigera-operator.yaml
@@ -536,4 +539,3 @@ case ${type} in
         break
         ;;
 esac
-
